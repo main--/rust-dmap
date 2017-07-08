@@ -1,5 +1,7 @@
 [package]
 name = "dmap"
+description = "Parse and serialize Apple's DMAP format."
+license = "MIT"
 version = "0.1.0"
 authors = ["main() <main@ehvag.de>"]
 
