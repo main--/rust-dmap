@@ -3,59 +3,19 @@ extern crate byteorder;
 #[macro_use] extern crate serde_derive;
 
 use byteorder::{BigEndian, ByteOrder};
-use serde::de::{self, Deserialize, DeserializeSeed, Visitor, IntoDeserializer};
 
-use std::{str, fmt, io};
+use std::{str, fmt};
+use std::borrow::Cow;
 
-macro_rules! enum_number {
-    ($name:ident { $($variant:ident = $value:expr, )* }) => {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        pub enum $name {
-            $($variant = $value,)*
-        }
+#[macro_use] mod enum_number;
 
-        impl ::serde::Serialize for $name {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                where S: ::serde::Serializer
-            {
-                // Serialize the enum as a u64.
-                serializer.serialize_u64(*self as u64)
-            }
-        }
+pub mod de;
+pub mod ser;
+pub mod value;
 
-        impl<'de> ::serde::Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                where D: ::serde::Deserializer<'de>
-            {
-                struct Visitor;
-
-                impl<'de> ::serde::de::Visitor<'de> for Visitor {
-                    type Value = $name;
-
-                    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                        formatter.write_str("positive integer")
-                    }
-
-                    fn visit_u64<E>(self, value: u64) -> Result<$name, E>
-                        where E: ::serde::de::Error
-                    {
-                        // Rust does not come with a simple way of converting a
-                        // number to an enum, so use a big `match`.
-                        match value {
-                            $( $value => Ok($name::$variant), )*
-                            _ => Err(E::custom(
-                                format!("unknown {} value: {}",
-                                stringify!($name), value))),
-                        }
-                    }
-                }
-
-                // Deserialize the enum from a u64.
-                deserializer.deserialize_u64(Visitor)
-            }
-        }
-    }
-}
+pub use value::{DmapValue, DmapItem};
+pub use de::{from_slice, Deserializer};
+pub use ser::{to_vec, Serializer};
 
 #[repr(u16)]
 enum_number!(TypeKind {
@@ -73,39 +33,11 @@ enum_number!(TypeKind {
     Container = 12,
 });
 
-/*
-#[derive(Debug, Clone)]
-struct Type<'a> {
-    code: [u8; 4],
-    name: &'a str,
-    kind: TypeKind,
-}*/
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DmapItem<'a, 'k> {
-    name: Result<&'k str, [u8; 4]>,
-    value: DmapValue<'a, 'k>
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DmapValue<'a, 'k> {
-    I8(i8),
-    U8(u8),
-    I16(i16),
-    U16(u16),
-    I32(i32),
-    U32(u32),
-    I64(i64),
-    U64(u64),
-    String(&'a str),
-    Container(Vec<DmapItem<'a, 'k>>),
-    Unknown(&'a [u8]),
-}
 
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct ContentCode<'a> {
-    #[serde(rename = "dmap.contentcodesnumber", deserialize_with = "de_content_code")]
+    #[serde(rename = "dmap.contentcodesnumber", deserialize_with = "de_content_code", serialize_with = "ser_content_code")]
     code: [u8; 4],
     #[serde(borrow)]
     #[serde(rename = "dmap.contentcodesname")]
@@ -115,10 +47,10 @@ struct ContentCode<'a> {
 }
 
 fn de_content_code<'de, D>(d: D) -> Result<[u8; 4], D::Error>
-    where D: de::Deserializer<'de>
+    where D: serde::de::Deserializer<'de>
 {
     struct ContentCodeVisitor;
-    impl<'de> de::Visitor<'de> for ContentCodeVisitor {
+    impl<'de> serde::de::Visitor<'de> for ContentCodeVisitor {
         type Value = [u8; 4];
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
@@ -130,163 +62,35 @@ fn de_content_code<'de, D>(d: D) -> Result<[u8; 4], D::Error>
             BigEndian::write_u32(&mut buf, x);
             Ok(buf)
         }
+
+        fn visit_i32<E>(self, x: i32) -> Result<Self::Value, E> {
+            let mut buf = [0; 4]; // KILL ME
+            BigEndian::write_i32(&mut buf, x);
+            Ok(buf)
+        }
     }
     d.deserialize_u32(ContentCodeVisitor)
 }
 
-#[derive(Deserialize, Debug, Clone)]
+fn ser_content_code<S>(code: &[u8; 4], s: S) -> Result<S::Ok, S::Error>
+    where S: serde::ser::Serializer
+{
+    serde::ser::Serialize::serialize(&BigEndian::read_i32(code), s)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct ContentCodesResponse<'a> {
     #[serde(rename = "dmap.status")]
-    status: u32,
+    status: i32,
     #[serde(rename = "dmap.dictionary", borrow)]
     dictionary: Vec<ContentCode<'a>>,
 }
 
-fn de<'a, 'de, 'k: 'de, T>(v: &'a DmapItem<'de, 'k>) -> T
-    where T: Deserialize<'de>
-{
-    T::deserialize(v).unwrap()
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ContentCodesResponseWrapper<'a> {
+    #[serde(rename = "dmap.contentcodesresponse", borrow)]
+    inner: ContentCodesResponse<'a>
 }
-
-impl<'de, 'a, 'k: 'de> de::Deserializer<'de> for &'a DmapItem<'de, 'k> {
-    type Error = serde::de::value::Error;
-
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, serde::de::value::Error>
-        where V: Visitor<'de>
-    {
-        match &self.value {
-            &DmapValue::U16(x) => visitor.visit_u16(x),
-            &DmapValue::U32(x) => visitor.visit_u32(x),
-            &DmapValue::String(x) => visitor.visit_borrowed_str(x),
-            _ => panic!("unimplemented {:#?}", self.value),
-        }
-    }
-
-    fn deserialize_struct<V>(self,
-                             _name: &'static str,
-                             _fields: &'static [&'static str],
-                             visitor: V) -> Result<V::Value, serde::de::value::Error>
-        where V: Visitor<'de>
-    {
-        match &self.value {
-            &DmapValue::Container(ref c) => visitor.visit_map(MapSeqVisitor {
-                map: c.as_slice(),
-                index: 0,
-            }),
-            _ => panic!("unimpl {:#?}", self.value),
-        }
-    }
-
-    /*
-    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-        where V: Visitor<'de>
-    {
-        /*
-        match &self.value {
-            &DmapValue::Container(ref c) => visitor.visit_seq(MapSeqVisitor {
-                map: c.as_slice(),
-                index: 0,
-            }),
-            _ => unimplemented!(),
-        }
-         */
-        unimplemented!();
-    }*/
-
-    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-        where V: Visitor<'de>
-    {
-        /*
-        use de::Error;
-        println!("ignored_any");
-        Err(Self::Error::custom("cslul"))
-         */
-        visitor.visit_none()
-    }
-
-    forward_to_deserialize_any! {
-        bool u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 char str string
-        bytes byte_buf map unit newtype_struct enum seq
-        unit_struct tuple_struct tuple option identifier
-    }
-}
-
-struct MapSeqVisitor<'a, 'de: 'a, 'k: 'a> {
-    map: &'a [DmapItem<'de, 'k>],
-    index: usize,
-}
-
-impl<'a, 'de: 'a, 'k: 'a + 'de> de::MapAccess<'de> for MapSeqVisitor<'a, 'de, 'k> {
-    type Error = serde::de::value::Error;
-
-    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
-        where K: DeserializeSeed<'de>
-    {
-        if self.index == self.map.len() {
-            Ok(None)
-        } else {
-            let name: &'k str = self.map[self.index].name.unwrap();
-            //println!("yielding {}", name);
-            self.index += 1;
-            seed.deserialize(name.into_deserializer()).map(Some)
-        }
-    }
-
-    fn next_value_seed<K>(&mut self, seed: K) -> Result<K::Value, Self::Error>
-        where K: DeserializeSeed<'de>
-    {
-        let element = &self.map[self.index - 1];
-        let seqlen = self.map.iter().skip(self.index).take_while(|x| x.name == element.name).count();
-        if seqlen > 0 {
-            // seq detected (ugly hack but whatever)
-            let seq = &self.map[self.index-1..][..seqlen+1];
-            self.index += seqlen;
-            seed.deserialize(SeqDeserializer { items: seq })
-        } else {
-            seed.deserialize(&self.map[self.index - 1])
-        }
-    }
-}
-
-impl<'a, 'de: 'a, 'k: 'a + 'de> de::SeqAccess<'de> for MapSeqVisitor<'a, 'de, 'k> {
-    type Error = serde::de::value::Error;
-
-    fn next_element_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
-        where K: DeserializeSeed<'de>
-    {
-        if self.index == self.map.len() {
-            Ok(None)
-        } else {
-            self.index += 1;
-            seed.deserialize(&self.map[self.index - 1]).map(Some)
-        }
-    }
-}
-
-struct SeqDeserializer<'a, 'de: 'a, 'k: 'a> {
-    items: &'a [DmapItem<'de, 'k>],
-}
-
-impl<'a, 'de: 'a, 'k: 'de + 'a> de::Deserializer<'de> for SeqDeserializer<'a, 'de, 'k> {
-    type Error = serde::de::value::Error;
-
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, serde::de::value::Error>
-        where V: Visitor<'de>
-    {
-        visitor.visit_seq(MapSeqVisitor {
-            map: self.items,
-            index: 0,
-        })
-    }
-
-    forward_to_deserialize_any! {
-        bool u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 char str string
-        bytes byte_buf map unit newtype_struct seq struct ignored_any
-        unit_struct tuple_struct tuple option identifier enum
-    }
-}
-
-use std::borrow::Cow;
 
 pub struct Parser<'names> {
     types: Cow<'names, [ContentCode<'names>]>,
@@ -294,11 +98,11 @@ pub struct Parser<'names> {
 
 static BOOTSTRAP_TYPES: &'static [ContentCode<'static>] = &[
     ContentCode { code: *b"mccr", name: "dmap.contentcodesresponse", kind: TypeKind::Container },
-    ContentCode { code: *b"mstt", name: "dmap.status", kind: TypeKind::U32 },
+    ContentCode { code: *b"mstt", name: "dmap.status", kind: TypeKind::I32 },
     ContentCode { code: *b"mdcl", name: "dmap.dictionary", kind: TypeKind::Container },
     ContentCode { code: *b"mcnm", name: "dmap.contentcodesnumber", kind: TypeKind::U32 },
     ContentCode { code: *b"mcna", name: "dmap.contentcodesname", kind: TypeKind::String },
-    ContentCode { code: *b"mcty", name: "dmap.contentcodestype", kind: TypeKind::U16 },
+    ContentCode { code: *b"mcty", name: "dmap.contentcodestype", kind: TypeKind::I16 },
 ];
 
 impl<'names> Parser<'names> {
@@ -306,43 +110,55 @@ impl<'names> Parser<'names> {
         let mut parser = Parser {
             types: Cow::Borrowed(BOOTSTRAP_TYPES),
         };
-        let ccs = parser.parse(content_codes).unwrap();
-        // fixme: convert asserts to errors
-        //println!("{:#?}", ccs);
 
-        assert_eq!(ccs.name, Ok("dmap.contentcodesresponse"));
-        let ccs: ContentCodesResponse = de(&ccs);
-        //println!("{:#?}", ccs);
+        let ccsw: ContentCodesResponseWrapper = de::from_slice(&parser, content_codes).unwrap();
 
+        let mut ccs = ccsw.inner;
         assert_eq!(ccs.status, 200);
+
+        //println!("{:#?}", ccs);
+
+        // fix these because apple gave them a wrong type (???wtf???)
+        // FIXME develop a better solution
+        ccs.dictionary.iter_mut().find(|x| x.name == "dmap.editcommandssupported").unwrap().kind = TypeKind::I16;
+        ccs.dictionary.iter_mut().find(|x| x.name == "dmap.authenticationschemes").unwrap().kind = TypeKind::I8;
+        ccs.dictionary.iter_mut().find(|x| x.name == "com.apple.itunes.itms-playlistid").unwrap().kind = TypeKind::I64;
+        ccs.dictionary.iter_mut().find(|x| x.name == "com.apple.itunes.rental-pb-start").unwrap().kind = TypeKind::String;
+        ccs.dictionary.iter_mut().find(|x| x.name == "dmap.itemdateplayed").unwrap().kind = TypeKind::I32;
         parser.types = Cow::Owned(ccs.dictionary);
 
         parser
     }
 
-    pub fn parse<'a>(&self, data: &'a [u8]) -> io::Result<DmapItem<'a, 'names>> {
-        self.do_parse(data).and_then(|(x, t)| if t.is_empty() { Ok(x) } else { Err(io::Error::new(io::ErrorKind::Other, "cslul")) })
+    #[cfg(test)]
+    fn old_parse<'a>(&self, data: &'a [u8]) -> DmapItem<'a, 'names> {
+        let (x, t) = self.old_do_parse(data);
+        assert!(t.is_empty());
+        x
     }
 
-    fn do_parse<'a>(&self, data: &'a [u8]) -> io::Result<(DmapItem<'a, 'names>, &'a [u8])> {
+    #[cfg(test)]
+    fn old_do_parse<'a>(&self, data: &'a [u8]) -> (DmapItem<'a, 'names>, &'a [u8]) {
+        use value::ItemName;
+
         let mut code = [0; 4];
         code.copy_from_slice(&data[0..4]);
         let size = BigEndian::read_u32(&data[4..8]) as usize;
-        //println!("handling {}", typ.name);
-        //println!("{} vs {}", data.len(), 8+size);
+
         let body = &data[8..8+size];
         let tail = &data[8+size..];
 
         let item = match self.types.iter().find(|x| x.code == code) {
             Some(typ) => DmapItem {
-                name: Ok(typ.name),
+                name: ItemName::Name(typ.name),
                 value: match typ.kind {
                     TypeKind::I8 => DmapValue::I8(body[0] as i8),
                     TypeKind::U8 => DmapValue::U8(body[0]),
                     TypeKind::I16 => DmapValue::I16(BigEndian::read_i16(body)),
                     TypeKind::U16 => DmapValue::U16(BigEndian::read_u16(body)),
                     TypeKind::I32 => DmapValue::I32(BigEndian::read_i32(body)),
-                    TypeKind::U32 | TypeKind::Timestamp /*fixme*/ => DmapValue::U32(BigEndian::read_u32(body)),
+                    TypeKind::U32 | TypeKind::Timestamp | TypeKind::Version /*fixme*/
+                        => DmapValue::U32(BigEndian::read_u32(body)),
                     TypeKind::I64 => DmapValue::I64(BigEndian::read_i64(body)),
                     TypeKind::U64 => DmapValue::U64(BigEndian::read_u64(body)),
                     TypeKind::String => DmapValue::String(str::from_utf8(body).unwrap()), // fixme unwrap
@@ -350,43 +166,73 @@ impl<'names> Parser<'names> {
                         let mut values = Vec::new();
                         let mut todo = body;
                         while !todo.is_empty() {
-                            let (v, t) = self.do_parse(todo)?;
+                            let (v, t) = self.old_do_parse(todo);
                             values.push(v);
                             todo = t;
                         }
                         DmapValue::Container(values)
                     }
-                    _ => panic!("unimpl {:?}", typ.kind),
                 }
             },
             None => DmapItem {
-                name: Err(code),
+                name: ItemName::Code(code),
                 value: DmapValue::Unknown(body),
             },
         };
 
-        Ok((item, tail))
+        (item, tail)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use value::ItemName;
+
+    fn verify_parse<'a, 'b, 'k: 'b>(parser: &'a Parser<'k>, data: &'b [u8]) -> DmapItem<'b, 'b> {
+        let val1: DmapValue = de::from_slice(parser, data).unwrap();
+        let val2 = parser.old_parse(data);
+
+        let data2 = ser::to_vec(&parser, &val1).unwrap();
+        assert_eq!(data.len(), data2.len());
+        assert_eq!(data, data2.as_slice());
+        let val3: DmapValue = de::from_slice(&parser, data2.as_slice()).unwrap();
+        assert_eq!(val1, val3);
+
+        let val1 = match val1 {
+            DmapValue::Container(v) => v,
+            _ => unreachable!(),
+        };
+        assert_eq!(val1.len() , 1);
+
+
+        //println!("{:#?} vs {:#?}", val1[0], val2);
+        assert_eq!(val1[0], val2);
+        val1.into_iter().next().unwrap()
+    }
 
     #[test]
     fn content_codes() {
-        Parser::new(include_bytes!("../testdata/content-codes.bin"));
+        let ccs = include_bytes!("../testdata/content-codes.bin");
+        let parser = Parser::new(ccs);
+        verify_parse(&parser, ccs);
+    }
+
+    #[test]
+    fn serverinfo() {
+        let parser = Parser::new(include_bytes!("../testdata/content-codes.bin"));
+        verify_parse(&parser, include_bytes!("../testdata/server-info.bin"));
     }
 
     #[test]
     fn login() {
         let parser = Parser::new(include_bytes!("../testdata/content-codes.bin"));
-        let login = parser.parse(include_bytes!("../testdata/login.bin")).unwrap();
+        let login = verify_parse(&parser, include_bytes!("../testdata/login.bin"));
         println!("{:#?}", login);
-        assert_eq!(login.name, Ok("dmap.loginresponse"));
+        assert_eq!(login.name, ItemName::Name("dmap.loginresponse"));
         match login.value {
             DmapValue::Container(c) => {
-                assert_eq!(c[0].name, Ok("dmap.status"));
+                assert_eq!(c[0].name, ItemName::Name("dmap.status"));
                 assert_eq!(c[0].value, DmapValue::I32(200));
             }
             _ => unreachable!(),
@@ -398,10 +244,11 @@ mod tests {
         // items.bin is not in the repo
         // so expect this to fail unless you provide your own copy
         use std::fs::File;
+        use std::io::Read;
         let parser = Parser::new(include_bytes!("../testdata/content-codes.bin"));
         let mut items = Vec::new();
         File::open("testdata/items.bin").unwrap().read_to_end(&mut items).unwrap();
-        let items = parser.parse(items.as_slice()).unwrap();
+        let items = verify_parse(&parser, items.as_slice());
         println!("{:?}", items); // just parsing this is already impressive
     }
 }
