@@ -14,7 +14,7 @@ pub mod ser;
 pub mod value;
 
 pub use value::{DmapValue, DmapItem};
-pub use de::{from_slice, Deserializer};
+pub use de::{from_slice, MapDeserializer};
 pub use ser::{to_vec, Serializer};
 
 #[repr(u16)]
@@ -190,25 +190,19 @@ mod tests {
     use value::ItemName;
 
     fn verify_parse<'a, 'b, 'k: 'b>(parser: &'a Parser<'k>, data: &'b [u8]) -> DmapItem<'b, 'b> {
-        let val1: DmapValue = de::from_slice(parser, data).unwrap();
+        let val1: DmapItem = de::from_slice(parser, data).unwrap();
         let val2 = parser.old_parse(data);
 
         let data2 = ser::to_vec(&parser, &val1).unwrap();
         assert_eq!(data.len(), data2.len());
         assert_eq!(data, data2.as_slice());
-        let val3: DmapValue = de::from_slice(&parser, data2.as_slice()).unwrap();
+        let val3: DmapItem = de::from_slice(&parser, data2.as_slice()).unwrap();
         assert_eq!(val1, val3);
-
-        let val1 = match val1 {
-            DmapValue::Container(v) => v,
-            _ => unreachable!(),
-        };
-        assert_eq!(val1.len() , 1);
 
 
         //println!("{:#?} vs {:#?}", val1[0], val2);
-        assert_eq!(val1[0], val2);
-        val1.into_iter().next().unwrap()
+        assert_eq!(val1, val2);
+        val1
     }
 
     #[test]

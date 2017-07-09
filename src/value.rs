@@ -30,6 +30,35 @@ pub enum ItemName<'k> {
     Code([u8; 4]),
 }
 
+impl<'de> de::Deserialize<'de> for DmapItem<'de, 'de> {
+    fn deserialize<D>(deserializer: D) -> Result<DmapItem<'de, 'de>, D::Error>
+        where D: de::Deserializer<'de>
+    {
+        struct ItemVisitor;
+
+        impl<'de> de::Visitor<'de> for ItemVisitor {
+            type Value = DmapItem<'de, 'de>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("any valid DMAP item")
+            }
+
+            fn visit_map<V>(self, mut visitor: V) -> Result<Self::Value, V::Error>
+                where V: de::MapAccess<'de>
+            {
+                use serde::de::Error;
+                if let Some((k, v)) = visitor.next_entry()? {
+                    Ok(DmapItem { name: k, value: v })
+                } else {
+                    Err(V::Error::custom("failed to get entry"))
+                }
+            }
+        }
+
+        deserializer.deserialize_map(ItemVisitor)
+    }
+}
+
 impl<'de> de::Deserialize<'de> for ItemName<'de> {
     fn deserialize<D>(deserializer: D) -> Result<ItemName<'de>, D::Error>
         where D: de::Deserializer<'de>
@@ -129,6 +158,16 @@ impl<'de> de::Deserialize<'de> for DmapValue<'de, 'de> {
         }
 
         deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
+impl<'a, 'k> ser::Serialize for DmapItem<'a, 'k> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: ser::Serializer
+    {
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(&self.name, &self.value)?;
+        map.end()
     }
 }
 
